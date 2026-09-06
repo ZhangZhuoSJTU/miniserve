@@ -1,0 +1,5 @@
+# macOS's application firewall RSTs incoming connections to the machine's LAN IP
+# for unsigned binaries, but miniserve announces that LAN address first and the
+# test harness fetches whichever URL it prints first -> RemoteDisconnected. Bind
+# to loopback only so the announced (and fetched) URL is always 127.0.0.1.
+export MINISERVE_INTERFACE=127.0.0.1

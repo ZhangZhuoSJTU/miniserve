@@ -1,0 +1,13 @@
+# Course-side exclusions: tests that are environment-sensitive outside the
+# benchmark containers. Format: <branch>/<classname>.<testname>
+
+# macOS's application firewall accepts but then drops connections to the host's
+# own LAN IP for this unsigned binary, and miniserve announces that LAN address
+# first; the test harness fetches whichever URL it prints first, so the serving
+# tests time out (RemoteDisconnected). We set MINISERVE_INTERFACE=127.0.0.1 so it
+# binds/announces loopback only, which serves correctly. clap then echoes that env
+# value in --help / usage output, so these three exact-match / arg-validation tests
+# (which capture the interfaces line) no longer match the container goldens.
+a7a6300313bd/eval.tests.test_help_output.test_dash_dash_help_exact_match_fixture
+a7a6300313bd/eval.tests.test_help_output.test_short_h_exact_match_fixture
+0dc825e98b10/eval.tests.test_argparse_validation.test_spa_requires_index
