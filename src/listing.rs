@@ -157,6 +157,68 @@ impl Breadcrumb {
     }
 }
 
+/// Sort directory entries in place by the requested method and order, optionally
+/// grouping directories ahead of files.
+fn sort_entries(
+    entries: &mut [Entry],
+    method: SortingMethod,
+    order: SortingOrder,
+    dirs_first: bool,
+) {
+    match method {
+        SortingMethod::Name => entries.sort_by(|e1, e2| {
+            alphanumeric_sort::compare_str(e1.name.to_lowercase(), e2.name.to_lowercase())
+        }),
+        SortingMethod::Size => entries.sort_by(|e1, e2| {
+            // If we can't get the size of the entry (directory for instance)
+            // let's consider it's 0b
+            e2.size
+                .unwrap_or_else(|| ByteSize::b(0))
+                .cmp(&e1.size.unwrap_or_else(|| ByteSize::b(0)))
+        }),
+        SortingMethod::Date => entries.sort_by(|e1, e2| {
+            // If, for some reason, we can't get the last modification date of an entry
+            // let's consider it was modified on UNIX_EPOCH (01/01/19270 00:00:00)
+            e2.last_modification_date
+                .unwrap_or(SystemTime::UNIX_EPOCH)
+                .cmp(&e1.last_modification_date.unwrap_or(SystemTime::UNIX_EPOCH))
+        }),
+    };
+
+    if let SortingOrder::Asc = order {
+        entries.reverse()
+    }
+
+    // List directories first
+    if dirs_first {
+        entries.sort_by_key(|e| !e.is_dir());
+    }
+}
+
+/// Build the link for a file entry when an external base URL is configured,
+/// joining that base with the file's path relative to the served root.
+fn external_file_link(external_url: &str, encoded_dir: &str, file_name: &str) -> String {
+    // `encoded_dir` holds the current directory relative to the prefix (e.g.
+    // `/subdir1/subdir2`); strip the surrounding slashes before joining.
+    let current_relative_dir = encoded_dir.trim_matches('/');
+
+    let full_relative_path = if current_relative_dir.is_empty() {
+        utf8_percent_encode(file_name, COMPONENT).to_string()
+    } else {
+        format!(
+            "{}/{}",
+            current_relative_dir,
+            utf8_percent_encode(file_name, COMPONENT)
+        )
+    };
+
+    format!(
+        "{}/{}",
+        external_url.trim_end_matches('/'),
+        full_relative_path
+    )
+}
+
 pub async fn file_handler(req: HttpRequest) -> actix_web::Result<actix_files::NamedFile> {
     let path = &req
         .app_data::<web::Data<crate::MiniserveConfig>>()
@@ -291,29 +353,7 @@ pub fn directory_listing(
                 } else if metadata.is_file() {
                     let file_link = match &conf.file_external_url {
                         Some(external_url) => {
-                            // Construct the full relative path including subdirectories
-                            // encoded_dir holds the current directory path relative to the prefix (e.g., /subdir1/subdir2)
-                            let current_relative_dir = encoded_dir.trim_matches('/'); // Remove leading/trailing slashes if any
-
-                            // Combine the relative directory path and the filename
-                            let full_relative_path = if current_relative_dir.is_empty() {
-                                // If in the root directory, just use the filename
-                                utf8_percent_encode(&file_name, COMPONENT).to_string()
-                            } else {
-                                // Otherwise, join directory and filename
-                                format!(
-                                    "{}/{}",
-                                    current_relative_dir,
-                                    utf8_percent_encode(&file_name, COMPONENT)
-                                )
-                            };
-
-                            // Join the external external URL with the full relative path
-                            format!(
-                                "{}/{}",
-                                external_url.trim_end_matches('/'), // Base URL without trailing slash
-                                full_relative_path // Relative path (dir + file) - should not have leading slash here
-                            )
+                            external_file_link(external_url, &encoded_dir, &file_name)
                         }
                         None => file_url,
                     };
@@ -346,34 +386,12 @@ pub fn directory_listing(
         }
     }
 
-    match query_params.sort.unwrap_or(conf.default_sorting_method) {
-        SortingMethod::Name => entries.sort_by(|e1, e2| {
-            alphanumeric_sort::compare_str(e1.name.to_lowercase(), e2.name.to_lowercase())
-        }),
-        SortingMethod::Size => entries.sort_by(|e1, e2| {
-            // If we can't get the size of the entry (directory for instance)
-            // let's consider it's 0b
-            e2.size
-                .unwrap_or_else(|| ByteSize::b(0))
-                .cmp(&e1.size.unwrap_or_else(|| ByteSize::b(0)))
-        }),
-        SortingMethod::Date => entries.sort_by(|e1, e2| {
-            // If, for some reason, we can't get the last modification date of an entry
-            // let's consider it was modified on UNIX_EPOCH (01/01/19270 00:00:00)
-            e2.last_modification_date
-                .unwrap_or(SystemTime::UNIX_EPOCH)
-                .cmp(&e1.last_modification_date.unwrap_or(SystemTime::UNIX_EPOCH))
-        }),
-    };
-
-    if let SortingOrder::Asc = query_params.order.unwrap_or(conf.default_sorting_order) {
-        entries.reverse()
-    }
-
-    // List directories first
-    if conf.dirs_first {
-        entries.sort_by_key(|e| !e.is_dir());
-    }
+    sort_entries(
+        &mut entries,
+        query_params.sort.unwrap_or(conf.default_sorting_method),
+        query_params.order.unwrap_or(conf.default_sorting_order),
+        conf.dirs_first,
+    );
 
     if let Some(archive_method) = query_params.download {
         if !archive_method.is_enabled(conf.tar_enabled, conf.tar_gz_enabled, conf.zip_enabled) {

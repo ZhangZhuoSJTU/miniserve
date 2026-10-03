@@ -11,23 +11,32 @@ use std::{
 /// See the unit tests tests::test_sanitize_path* for examples
 pub fn sanitize_path(path: impl AsRef<Path>, traverse_hidden: bool) -> Option<PathBuf> {
     let mut buf = PathBuf::new();
+    let mut traversed_parent = false;
 
     for comp in path.as_ref().components() {
         match comp {
             Component::Normal(name) => buf.push(name),
             Component::ParentDir => {
+                traversed_parent = true;
                 buf.pop();
             }
             _ => (),
         }
     }
 
-    // Double-check that all components are Normal and check for hidden dirs
-    for comp in buf.components() {
-        match comp {
-            Component::Normal(_) if traverse_hidden => (),
-            Component::Normal(name) if !name.to_str()?.starts_with('.') => (),
-            _ => return None,
+    // Disallow `..` components that resolve to or above the served root.
+    if traversed_parent && buf.as_os_str().is_empty() {
+        return None;
+    }
+
+    // Unless hidden traversal is explicitly allowed, reject any path that still
+    // contains a hidden component (a name starting with a dot) after resolution.
+    if !traverse_hidden {
+        for comp in buf.components() {
+            match comp {
+                Component::Normal(name) if name.to_str()?.starts_with('.') => return None,
+                _ => (),
+            }
         }
     }
 

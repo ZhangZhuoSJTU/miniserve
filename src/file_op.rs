@@ -104,6 +104,42 @@ pub async fn recursive_dir_size(dir: &Path) -> Result<u64, RuntimeError> {
     Ok(total_size)
 }
 
+/// Reject an operation whose path traverses through a symlink, unless symlinks
+/// are explicitly allowed.
+///
+/// `check_path` is the on-disk path inspected for symlink components, while
+/// `report_path` is the (possibly relative) path echoed back in error messages.
+fn reject_symlink_traversal(
+    check_path: &Path,
+    report_path: &Path,
+    allow_symlinks: bool,
+) -> Result<(), RuntimeError> {
+    if allow_symlinks {
+        return Ok(());
+    }
+    match contains_symlink(check_path) {
+        Err(err) => Err(RuntimeError::InsufficientPermissionsError(err.to_string())),
+        Ok(true) => Err(RuntimeError::InsufficientPermissionsError(format!(
+            "{report_path:?} traverses through a symlink"
+        ))),
+        Ok(false) => Ok(()),
+    }
+}
+
+/// Build a redirect back to the page the request came from, as given by its
+/// `Referer` header, falling back to the site root when it is absent or unreadable.
+fn redirect_to_referer(req: &HttpRequest) -> HttpResponse {
+    let return_path = req
+        .headers()
+        .get(header::REFERER)
+        .and_then(|h| h.to_str().ok())
+        .unwrap_or("/");
+
+    HttpResponse::SeeOther()
+        .append_header((header::LOCATION, return_path))
+        .finish()
+}
+
 /// Saves file data from a multipart form field (`field`) to `file_path`. Optionally overwriting
 /// existing file and comparing the uploaded file checksum to the user provided `file_hash`.
 ///
@@ -379,15 +415,7 @@ async fn handle_multipart(
         })?;
 
         // Ensure there are no illegal symlinks
-        if !allow_symlinks {
-            match contains_symlink(&absolute_path) {
-                Err(err) => Err(RuntimeError::InsufficientPermissionsError(err.to_string()))?,
-                Ok(true) => Err(RuntimeError::InsufficientPermissionsError(format!(
-                    "{user_given_path:?} traverses through a symlink"
-                )))?,
-                Ok(false) => (),
-            }
-        }
+        reject_symlink_traversal(&absolute_path, &user_given_path, allow_symlinks)?;
 
         return match tokio::fs::create_dir_all(&absolute_path).await {
             Err(err) if err.kind() == ErrorKind::PermissionDenied => Err(
@@ -416,15 +444,7 @@ async fn handle_multipart(
         .ok_or_else(|| RuntimeError::InvalidPathError("Invalid file name to upload".to_string()))?;
 
     // Ensure there are no illegal symlinks in the file upload path
-    if !allow_symlinks {
-        match contains_symlink(&path) {
-            Err(err) => Err(RuntimeError::InsufficientPermissionsError(err.to_string()))?,
-            Ok(true) => Err(RuntimeError::InsufficientPermissionsError(format!(
-                "{path:?} traverses through a symlink"
-            )))?,
-            Ok(false) => (),
-        }
-    }
+    reject_symlink_traversal(&path, &path, allow_symlinks)?;
 
     save_file(
         &mut field,
@@ -530,15 +550,7 @@ pub async fn upload_file(
         .try_collect::<Vec<u64>>()
         .await?;
 
-    let return_path = req
-        .headers()
-        .get(header::REFERER)
-        .and_then(|h| h.to_str().ok())
-        .unwrap_or("/");
-
-    Ok(HttpResponse::SeeOther()
-        .append_header((header::LOCATION, return_path))
-        .finish())
+    Ok(redirect_to_referer(&req))
 }
 
 /// Handle incoming request to remove a file or directory.
@@ -595,13 +607,5 @@ pub async fn rm_file(
         ))?;
     }
 
-    let return_path = req
-        .headers()
-        .get(header::REFERER)
-        .and_then(|h| h.to_str().ok())
-        .unwrap_or("/");
-
-    Ok(HttpResponse::SeeOther()
-        .append_header((header::LOCATION, return_path))
-        .finish())
+    Ok(redirect_to_referer(&req))
 }
